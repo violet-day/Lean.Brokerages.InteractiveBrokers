@@ -4532,6 +4532,11 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
         /// <param name="ticker">Ticker for the symbol</param>
         private string GetSymbolExchange(SecurityType securityType, string market, string ticker = null)
         {
+            // Any symbol ending in "..CNT" represents a non-tradable
+            if(ticker.EndsWith(".CNT"))
+            {
+                return "VALUE";
+            }
             switch (securityType)
             {
                 case SecurityType.Option:
