@@ -1550,7 +1550,9 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
         /// <param name="ticker">The associated Lean ticker. Just used for logging, can be provided empty</param>
         private ContractDetails GetContractDetailsImpl(Contract contract, string ticker, bool failIfNotFound = true)
         {
-            if (ticker.EndsWith("cnt"))
+            Console.WriteLine("ssssssssssssssssssss");
+            Console.WriteLine($"{ticker}");
+            if (ticker.EndsWith("CNT"))
             {
                 Log.Trace($"InteractiveBrokersBrokerage.Subscribe: cause {ticker} is cvr, so ignore subscribe request");
                 return null;
