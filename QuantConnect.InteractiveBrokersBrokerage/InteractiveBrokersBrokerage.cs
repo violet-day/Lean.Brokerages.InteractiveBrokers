@@ -4081,6 +4081,7 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
             Log.Trace($"InteractiveBrokersBrokerage.LookupSymbols(): Requesting symbol list for {contract.Symbol} ...");
 
             var symbols = new List<Symbol>();
+            Console.WriteLine($"symbol.SecurityType.IsOption() {symbol.SecurityType.IsOption()}");
 
             if (symbol.SecurityType.IsOption())
             {
@@ -4089,10 +4090,12 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
                 // For futures options, we fetch the option chain from CME.
                 if (_algorithm != null)
                 {
+                    Console.WriteLine("_algorithm != null");
                     symbols.AddRange(_algorithm.OptionChainProvider.GetOptionContractList(symbol, DateTime.Today));
                 }
                 else
                 {
+                    Console.WriteLine("_algorithm == null");
                     symbols.AddRange(Composer.Instance.GetPart<IOptionChainProvider>().GetOptionContractList(symbol, DateTime.Today));
                 }
             }
