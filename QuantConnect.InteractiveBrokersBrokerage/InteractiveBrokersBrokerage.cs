@@ -4090,7 +4090,7 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
                 // For futures options, we fetch the option chain from CME.
                 if (_algorithm != null)
                 {
-                    Console.WriteLine("_algorithm != null");
+                    Console.WriteLine($"_algorithm != null, {_algorithm.OptionChainProvider.GetType().Name}");
                     symbols.AddRange(_algorithm.OptionChainProvider.GetOptionContractList(symbol, DateTime.Today));
                 }
                 else
