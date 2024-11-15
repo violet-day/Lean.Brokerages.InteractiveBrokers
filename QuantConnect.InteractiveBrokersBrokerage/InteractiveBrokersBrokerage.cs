@@ -4095,7 +4095,7 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
                 }
                 else
                 {
-                    Console.WriteLine("_algorithm == null");
+                    Console.WriteLine($"_algorithm == null {Composer.Instance.GetPart<IOptionChainProvider>().GetType().Name}");
                     symbols.AddRange(Composer.Instance.GetPart<IOptionChainProvider>().GetOptionContractList(symbol, DateTime.Today));
                 }
             }
