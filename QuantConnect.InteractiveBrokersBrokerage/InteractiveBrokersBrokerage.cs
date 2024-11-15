@@ -3213,6 +3213,7 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
 
                 case SecurityType.Option:
                 case SecurityType.IndexOption:
+                    Console.WriteLine("return option");
                     return IB.SecurityType.Option;
 
                 case SecurityType.Index:
@@ -3231,6 +3232,7 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
                     return IB.SecurityType.ContractForDifference;
 
                 default:
+                    Console.WriteLine("catch default?");
                     throw new ArgumentException($"The {type} security type is not currently supported.");
             }
         }
@@ -4285,8 +4287,8 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
             catch (Exception ex)
             {
                 // 打印异常信息和堆栈跟踪
-                Console.WriteLine("Exception caught: " + ex.Message);
-                Console.WriteLine("Stack Trace: " + ex.StackTrace);
+                Console.WriteLine("Exception caught by me: " + ex.Message);
+                Console.WriteLine("Stack Trace by me: " + ex.StackTrace);
             }
             var contractDetails = GetContractDetails(contract, request.Symbol.Value);
             if (contract.SecType == IB.SecurityType.ContractForDifference)
