@@ -4277,6 +4277,7 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
 
             // preparing the data for IB request
             var contract = CreateContract(request.Symbol, includeExpired: true);
+            Console.WriteLine($"contract is null? {contract==null}");
             var contractDetails = GetContractDetails(contract, request.Symbol.Value);
             if (contract.SecType == IB.SecurityType.ContractForDifference)
             {
