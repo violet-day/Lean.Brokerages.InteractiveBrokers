@@ -4276,8 +4276,17 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
             }
 
             // preparing the data for IB request
-            var contract = CreateContract(request.Symbol, includeExpired: true);
-            Console.WriteLine($"contract is null? {contract==null}");
+            Contract contract = null;
+            try
+            {
+                contract = CreateContract(request.Symbol, includeExpired: true);
+            }
+            catch (Exception ex)
+            {
+                // 打印异常信息和堆栈跟踪
+                Console.WriteLine("Exception caught: " + ex.Message);
+                Console.WriteLine("Stack Trace: " + ex.StackTrace);
+            }
             var contractDetails = GetContractDetails(contract, request.Symbol.Value);
             if (contract.SecType == IB.SecurityType.ContractForDifference)
             {
