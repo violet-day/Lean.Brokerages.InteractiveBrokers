@@ -4142,13 +4142,10 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
 
             HashSet<DateTime> dates = new HashSet<DateTime>(symbols.Select(s => s.ID.Date));
             var minDate = dates.Min();
-            Console.WriteLine($"----option min date i s{minDate}");
-            foreach (var date in dates)
-            {
-                Console.WriteLine(date);
-            }
-            
+            Console.WriteLine($"----option min date is {minDate}");
+
             Console.WriteLine($"-------DateTime.Today? {DateTime.Today}");
+            symbols = symbols.FindAll(s => s.ID.Date == minDate);
             Log.Trace($"InteractiveBrokersBrokerage.LookupSymbols(): Returning {symbols.Count} contract(s) for {contract.Symbol}");
 
             return symbols;
