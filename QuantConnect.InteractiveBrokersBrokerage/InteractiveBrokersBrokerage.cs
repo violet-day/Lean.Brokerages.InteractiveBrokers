@@ -2946,6 +2946,7 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
                     contract.Strike = Convert.ToDouble(symbol.ID.StrikePrice);
                 }
                 contract.Symbol = ibSymbol;
+                Console.WriteLine("---end set Symbol");
                 contract.Multiplier = _symbolPropertiesDatabase.GetSymbolProperties(
                         symbol.ID.Market,
                         symbol,
