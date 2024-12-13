@@ -2876,6 +2876,7 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
                 SecType = securityType,
                 Currency = symbolProperties.QuoteCurrency
             };
+            Console.WriteLine($"----ib contract {contract}");
 
             if (symbol.ID.SecurityType == SecurityType.Forex)
             {
