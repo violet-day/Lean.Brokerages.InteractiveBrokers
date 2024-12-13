@@ -2917,6 +2917,7 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
             }
             else if (symbol.ID.SecurityType.IsOption())
             {
+                Console.WriteLine("-----enter symbol.ID.SecurityType.IsOption()");
                 // Subtract a day from Index Options, since their last trading date
                 // is on the day before the expiry.
                 var lastTradeDate = symbol.ID.Date;
@@ -2954,6 +2955,7 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
 
                 contract.TradingClass = GetTradingClass(contract, symbol);
                 contract.IncludeExpired = includeExpired;
+                Console.WriteLine("----end symbol.ID.SecurityType.IsOption()");
             }
             else if (symbol.ID.SecurityType == SecurityType.Future)
             {
@@ -2968,6 +2970,7 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
                 contract.IncludeExpired = includeExpired;
             }
 
+            Console.WriteLine($"-------orders.Count is {orders.Count}");
             if (orders != null && orders.Count > 1)
             {
                 // this is a combo order!
