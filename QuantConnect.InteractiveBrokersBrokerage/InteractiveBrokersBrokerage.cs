@@ -52,6 +52,7 @@ using IB = QuantConnect.Brokerages.InteractiveBrokers.Client;
 using Order = QuantConnect.Orders.Order;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using QLNet;
 using QuantConnect.Data.Auxiliary;
 using QuantConnect.Securities.Forex;
 using QuantConnect.Lean.Engine.Results;
@@ -4139,6 +4140,14 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
                 }
             }
 
+            HashSet<DateTime> dates = new HashSet<DateTime>(symbols.Select(s => s.ID.Date));
+            var minDate = dates.Min();
+            Console.WriteLine($"----option min date i s{minDate}");
+            foreach (var date in dates)
+            {
+                Console.WriteLine(date);
+            }
+            
             Console.WriteLine($"-------DateTime.Today? {DateTime.Today}");
             Log.Trace($"InteractiveBrokersBrokerage.LookupSymbols(): Returning {symbols.Count} contract(s) for {contract.Symbol}");
 
@@ -4173,7 +4182,7 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
         /// <remarks>For IB history limitations see https://www.interactivebrokers.com/en/software/api/apiguide/tables/historical_data_limitations.htm </remarks>
         public override IEnumerable<BaseData> GetHistory(HistoryRequest request)
         {
-            Console.WriteLine("------------enter GetHistory");
+            Console.WriteLine($"------------enter GetHistory {{request.StartTimeLocal}}");
             if (!IsConnected)
             {
                 OnMessage(
