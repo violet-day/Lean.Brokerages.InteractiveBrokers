@@ -2966,7 +2966,11 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
                 contract.IncludeExpired = includeExpired;
             }
 
-            Console.WriteLine($"-------orders.Count is {orders.Count}");
+            if (orders != null)
+            {
+                Console.WriteLine($"-------orders.Count is {orders.Count}");    
+            }
+            
             if (orders != null && orders.Count > 1)
             {
                 // this is a combo order!
@@ -2987,7 +2991,7 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
                     });
                 }
             }
-
+            Console.WriteLine($"-------end create contract");
             return contract;
         }
 
