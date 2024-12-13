@@ -2928,7 +2928,8 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
                 contract.LastTradeDateOrContractMonth = lastTradeDate.ToStringInvariant(DateFormat.EightCharacter);
 
                 contract.Right = symbol.ID.OptionRight == OptionRight.Call ? IB.RightType.Call : IB.RightType.Put;
-
+                Console.WriteLine("-----end set right");
+                
                 if (symbol.ID.SecurityType == SecurityType.FutureOption)
                 {
                     var underlyingContract = CreateContract(symbol.Underlying, includeExpired, null, exchange);
@@ -2952,7 +2953,7 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
                         _algorithm.Portfolio.CashBook.AccountCurrency)
                     .ContractMultiplier
                     .ToStringInvariant();
-
+                Console.WriteLine("---end set Multiplier");
                 contract.TradingClass = GetTradingClass(contract, symbol);
                 contract.IncludeExpired = includeExpired;
                 Console.WriteLine("----end symbol.ID.SecurityType.IsOption()");
