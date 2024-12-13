@@ -2859,7 +2859,7 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
         /// <returns>A new IB contract for the order</returns>
         private Contract CreateContract(Symbol symbol, bool includeExpired, List<Order> orders = null, string exchange = null)
         {
-            Console.WriteLine($"ConvertSecurityType {symbol.SecurityType}");
+            Console.WriteLine($"ConvertSecurityType {symbol.Value} {symbol.SecurityType}");
             var securityType = ConvertSecurityType(symbol.SecurityType);
             var ibSymbol = _symbolMapper.GetBrokerageSymbol(symbol);
 
@@ -3213,7 +3213,6 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
 
                 case SecurityType.Option:
                 case SecurityType.IndexOption:
-                    Console.WriteLine("return option");
                     return IB.SecurityType.Option;
 
                 case SecurityType.Index:
@@ -4168,6 +4167,7 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
         /// <remarks>For IB history limitations see https://www.interactivebrokers.com/en/software/api/apiguide/tables/historical_data_limitations.htm </remarks>
         public override IEnumerable<BaseData> GetHistory(HistoryRequest request)
         {
+            Console.WriteLine("------------enter GetHistory");
             if (!IsConnected)
             {
                 OnMessage(
@@ -4291,6 +4291,7 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
                 Console.WriteLine("Stack Trace by me: " + ex.StackTrace);
             }
             var contractDetails = GetContractDetails(contract, request.Symbol.Value);
+            Console.WriteLine($"-------ib contract i {contract.ToString()}");
             if (contract.SecType == IB.SecurityType.ContractForDifference)
             {
                 // IB does not have data for equity and forex CFDs, we need to use the underlying security
