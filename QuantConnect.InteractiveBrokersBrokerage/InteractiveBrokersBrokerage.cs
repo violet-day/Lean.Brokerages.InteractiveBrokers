@@ -4046,6 +4046,7 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
         /// <returns>Future/Option chain associated with the Symbol provided</returns>
         public IEnumerable<Symbol> LookupSymbols(Symbol symbol, bool includeExpired, string securityCurrency = null)
         {
+            Console.WriteLine($"------includeExpired {includeExpired}");
             // setting up exchange defaults and filters
             var exchangeSpecifier = GetSymbolExchange(symbol);
             var futuresExchanges = _futuresExchanges.Values.Reverse().ToArray();
@@ -4138,6 +4139,7 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
                 }
             }
 
+            Console.WriteLine($"-------DateTime.Today? {DateTime.Today}");
             Log.Trace($"InteractiveBrokersBrokerage.LookupSymbols(): Returning {symbols.Count} contract(s) for {contract.Symbol}");
 
             return symbols;
