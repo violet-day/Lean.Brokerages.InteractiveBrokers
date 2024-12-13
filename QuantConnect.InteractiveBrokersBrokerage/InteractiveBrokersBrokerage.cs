@@ -2947,13 +2947,8 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
                 }
                 contract.Symbol = ibSymbol;
                 Console.WriteLine("---end set Symbol");
-                contract.Multiplier = _symbolPropertiesDatabase.GetSymbolProperties(
-                        symbol.ID.Market,
-                        symbol,
-                        symbol.SecurityType,
-                        _algorithm.Portfolio.CashBook.AccountCurrency)
-                    .ContractMultiplier
-                    .ToStringInvariant();
+                Console.WriteLine($"{symbol.ID.Market}, {symbol},{symbol.SecurityType}, {_algorithm.Portfolio.CashBook.AccountCurrency}");
+                contract.Multiplier = "100";
                 Console.WriteLine("---end set Multiplier");
                 contract.TradingClass = GetTradingClass(contract, symbol);
                 contract.IncludeExpired = includeExpired;
