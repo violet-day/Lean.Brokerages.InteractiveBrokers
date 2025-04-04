@@ -3666,50 +3666,64 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
                 {
                     lock (_sync)
                     {
+                        
                         Log.Trace("InteractiveBrokersBrokerage.Subscribe(): Subscribe Request: " + symbol.Value);
 
                         if (!_subscribedSymbols.ContainsKey(symbol))
                         {
-                            // processing canonical option and futures symbols
-                            var subscribeSymbol = symbol;
-
-                            // we ignore futures canonical symbol
-                            if (symbol.ID.SecurityType == SecurityType.Future && symbol.IsCanonical())
+                            try
                             {
-                                continue;
+                                // processing canonical option and futures symbols
+                                var subscribeSymbol = symbol;
+
+                                // we ignore futures canonical symbol
+                                if (symbol.ID.SecurityType == SecurityType.Future && symbol.IsCanonical())
+                                {
+                                    continue;
+                                }
+
+                                // Skip subscribing to expired option contracts
+                                if (OptionSymbol.IsOptionContractExpired(symbol, DateTime.UtcNow))
+                                {
+                                    Log.Trace(
+                                        $"InteractiveBrokersBrokerage.Subscribe(): Skipping subscription for {symbol} because the contract has expired.");
+                                    continue;
+                                }
+
+                                var id = GetNextId();
+                                var contract = CreateContract(subscribeSymbol, includeExpired: false);
+                                var symbolProperties = _symbolPropertiesDatabase.GetSymbolProperties(
+                                    subscribeSymbol.ID.Market, subscribeSymbol, subscribeSymbol.SecurityType,
+                                    Currencies.USD);
+                                var priceMagnifier = symbolProperties.PriceMagnifier;
+
+                                _requestInformation[id] = new RequestInformation
+                                {
+                                    RequestId = id,
+                                    RequestType = RequestType.Subscription,
+                                    AssociatedSymbol = symbol,
+                                    Message =
+                                        $"[Id={id}] Subscribe: {symbol.Value} ({GetContractDescription(contract)})"
+                                };
+
+                                CheckRateLimiting();
+
+                                // track subscription time for minimum delay in unsubscribe
+                                _subscriptionTimes[id] = DateTime.UtcNow;
+
+                                RequestMarketData(contract, id);
+
+                                _subscribedSymbols[symbol] = id;
+                                _subscribedTickers[id] = new SubscriptionEntry
+                                    { Symbol = subscribeSymbol, PriceMagnifier = priceMagnifier };
+
+                                Log.Trace(
+                                    $"InteractiveBrokersBrokerage.Subscribe(): Subscribe Processed: {symbol.Value} ({GetContractDescription(contract)}) # {id}. SubscribedSymbols.Count: {_subscribedSymbols.Count}");
                             }
-
-                            // Skip subscribing to expired option contracts
-                            if (OptionSymbol.IsOptionContractExpired(symbol, DateTime.UtcNow))
+                            catch (Exception ex)
                             {
-                                Log.Trace($"InteractiveBrokersBrokerage.Subscribe(): Skipping subscription for {symbol} because the contract has expired.");
-                                continue;
+                                Log.Trace($"InteractiveBrokersBrokerage.Subscribe(): Subscribe Failed: {symbol.Value} cause {ex}");
                             }
-
-                            var id = GetNextId();
-                            var contract = CreateContract(subscribeSymbol, includeExpired: false);
-                            var symbolProperties = _symbolPropertiesDatabase.GetSymbolProperties(subscribeSymbol.ID.Market, subscribeSymbol, subscribeSymbol.SecurityType, Currencies.USD);
-                            var priceMagnifier = symbolProperties.PriceMagnifier;
-
-                            _requestInformation[id] = new RequestInformation
-                            {
-                                RequestId = id,
-                                RequestType = RequestType.Subscription,
-                                AssociatedSymbol = symbol,
-                                Message = $"[Id={id}] Subscribe: {symbol.Value} ({GetContractDescription(contract)})"
-                            };
-
-                            CheckRateLimiting();
-
-                            // track subscription time for minimum delay in unsubscribe
-                            _subscriptionTimes[id] = DateTime.UtcNow;
-
-                            RequestMarketData(contract, id);
-
-                            _subscribedSymbols[symbol] = id;
-                            _subscribedTickers[id] = new SubscriptionEntry { Symbol = subscribeSymbol, PriceMagnifier = priceMagnifier };
-
-                            Log.Trace($"InteractiveBrokersBrokerage.Subscribe(): Subscribe Processed: {symbol.Value} ({GetContractDescription(contract)}) # {id}. SubscribedSymbols.Count: {_subscribedSymbols.Count}");
                         }
                     }
                 }
