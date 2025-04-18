@@ -1841,6 +1841,7 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
             }
             else if (errorCode == 200)
             {
+                Console.WriteLine("------------- code 200");
                 // No security definition has been found for the request
                 if (requestInfo is not null)
                 {
