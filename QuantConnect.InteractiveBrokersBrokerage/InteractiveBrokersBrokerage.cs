@@ -1852,6 +1852,12 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
                         {
                             var resolver = _mapFileProvider.Get(AuxiliaryDataKey.Create(requestInfo.AssociatedSymbol));
                             mapFile = resolver.ResolveMapFile(requestInfo.AssociatedSymbol);
+                            Console.WriteLine($"-------------mapFile {mapFile.FirstDate} {DateTime.FromOADate(0)} {mapFile.FirstDate == DateTime.FromOADate(0)}");
+                            if (mapFile.FirstDate == DateTime.FromOADate(0))
+                            {
+                                return;
+                            }
+                            Console.WriteLine($"-------- on msg error code=200");
                         }
                         var historicalLimitDate = requestInfo.AssociatedSymbol.GetDelistingDate(mapFile).AddDays(1)
                             .ConvertToUtc(requestInfo.HistoryRequest.ExchangeHours.TimeZone);
