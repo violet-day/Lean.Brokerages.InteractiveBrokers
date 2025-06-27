@@ -3804,6 +3804,11 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
 
                             var id = GetNextId();
                             var contract = CreateContract(subscribeSymbol, includeExpired: false);
+                            if (subscribeSymbol.Value.EndsWith("CNT"))
+                            {
+                                Console.Write($"InteractiveBrokersBrokerage.Subscribe: Cause {subscribeSymbol.Value} is Contingent Value Right, so ignore subscribe request");
+                                continue;
+                            }
                             var symbolProperties = _symbolPropertiesDatabase.GetSymbolProperties(subscribeSymbol.ID.Market, subscribeSymbol, subscribeSymbol.SecurityType, Currencies.USD);
                             var priceMagnifier = symbolProperties.PriceMagnifier;
 
@@ -3933,7 +3938,11 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
             {
                 return false;
             }
-
+            if (symbol.Value.EndsWith("CNT"))
+            {
+                Console.WriteLine($"InteractiveBrokersBrokerage.CanSubscribe: Cause {symbol.Value} is Contingent Value Right, so ignore get history");
+                return false;
+            }
             // Include future options as a special case with no matching market, otherwise
             // our subscriptions are removed without any sort of notice.
             return
