@@ -2673,7 +2673,19 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
                 }
                 else if (orders.Count == 0)
                 {
-                    Log.Error($"InteractiveBrokersBrokerage.HandleExecutionDetails(): Unable to locate order with BrokerageID {executionDetails.Execution.OrderId}");
+                    var message = $"Detected brokerage-side fill without a matching LEAN order. " +
+                        $"BrokerageOrderId: {executionDetails.Execution.OrderId}, " +
+                        $"PermanentId: {executionDetails.Execution.PermId}, " +
+                        $"ExecutionId: {executionDetails.Execution.ExecId}, " +
+                        $"Symbol: {mappedSymbol.Value}, " +
+                        $"Side: {executionDetails.Execution.Side}, " +
+                        $"Quantity: {executionDetails.Execution.Shares}, " +
+                        $"Price: {executionDetails.Execution.Price}";
+                    Log.Trace($"InteractiveBrokersBrokerage.HandleExecutionDetails(): {message}");
+                    OnMessage(new BrokerageMessageEvent(
+                        BrokerageMessageType.Information,
+                        "BrokerageSideOrderFill",
+                        message));
                 }
                 else
                 {
