@@ -3625,6 +3625,18 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
         /// </summary>
         private static string ConvertTimeInForce(Order order)
         {
+            if (order.Properties is InteractiveBrokersImmediateOrCancelOrderProperties { ImmediateOrCancel: true })
+            {
+                if (order.Type is not OrderType.Market and not OrderType.Limit)
+                {
+                    throw new ArgumentException(
+                        $"Interactive Brokers immediate-or-cancel is only supported for market and limit orders. Order type: {order.Type}",
+                        nameof(order));
+                }
+
+                return IB.TimeInForce.ImmediateOrCancel;
+            }
+
             if (order.Type == OrderType.MarketOnOpen)
             {
                 return IB.TimeInForce.MarketOnOpen;
@@ -3647,11 +3659,6 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
             //if (order.TimeInForce is FillOrKillTimeInForce)
             //{
             //    return IB.TimeInForce.FillOrKill;
-            //}
-
-            //if (order.TimeInForce is ImmediateOrCancelTimeInForce)
-            //{
-            //    return IB.TimeInForce.ImmediateOrCancel;
             //}
 
             return IB.TimeInForce.GoodTillCancel;
