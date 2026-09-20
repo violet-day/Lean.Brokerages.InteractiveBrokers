@@ -73,6 +73,12 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
         private const string BrokerageName = "Interactive Brokers Brokerage";
 
         /// <summary>
+        /// Prefix of the IBAutomater log line emitted when an order confirmation/warning
+        /// window is auto-accepted. The text after the prefix is the message shown to the user.
+        /// </summary>
+        private const string OrderConfirmationWindowMarker = "Order confirmation window: ";
+
+        /// <summary>
         /// During market open there can be some extra delay and resource constraint so let's be generous
         /// </summary>
         private static readonly TimeSpan _responseTimeout = TimeSpan.FromSeconds(Config.GetInt("ib-response-timeout", 60 * 5));
@@ -105,6 +111,9 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
         public static string DefaultVersion { get; } = "1034";
 
         private IBAutomater.IBAutomater _ibAutomater;
+
+        // true when the IB Gateway runs on another host and is managed externally, IBAutomater won't be started or driven
+        private bool _isRemoteGateway;
 
         // Existing orders created in TWS can *only* be cancelled/modified when connected with ClientId = 0
         private const int ClientId = 0;
@@ -153,6 +162,15 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
 
         // tracks pending brokerage order responses. In some cases we've seen orders been placed and they never get through to IB
         private readonly ConcurrentDictionary<int, ManualResetEventSlim> _pendingOrderResponse = new();
+
+        // time of the last detected gateway restart, to explain response timeouts of requests the restart raced
+        private DateTime _lastGatewayRestartTimeUtc;
+
+        // On a Financial Advisor account IBGateway confirms the first order of a deployment with a warning
+        // dialog and silently drops every other order that reaches it while that dialog is unanswered,
+        // so the first order goes alone
+        private readonly ManualResetEventSlim _financialAdvisorFirstOrderAnswered = new(false);
+        private int _financialAdvisorFirstOrderClaimed;
 
         // tracks the pending orders in the group before emitting the fill events
         private readonly Dictionary<int, List<PendingFillEvent>> _pendingGroupOrdersForFilling = new();
@@ -203,7 +221,8 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
             { Market.ICE, "NYBOT" },
             { Market.CFE, "CFE" },
             { Market.NYSELIFFE, "NYSELIFFE" },
-            { Market.EUREX, "EUREX" }
+            { Market.EUREX, "EUREX" },
+            { Market.KRX, "KSE" }
         };
 
         private static readonly SymbolPropertiesDatabase _symbolPropertiesDatabase = SymbolPropertiesDatabase.FromDataFolder();
@@ -528,7 +547,15 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
 
                     if (!eventSlim.Wait(_responseTimeout))
                     {
-                        OnMessage(new BrokerageMessageEvent(BrokerageMessageType.Error, "NoBrokerageResponse", $"Timeout waiting for brokerage response for brokerage order id {orderId} lean id {order.Id}"));
+                        if (_pendingOrderResponse.TryRemove(orderId, out _))
+                        {
+                            eventSlim.DisposeSafely();
+
+                            // IB holds the ack when it cannot act on the cancellation yet (order queued outside
+                            // regular trading hours, exchange session break): warn and carry on, the ack arrives on its own
+                            OnMessage(new BrokerageMessageEvent(BrokerageMessageType.Warning, "NoBrokerageResponse",
+                                $"Timeout waiting for brokerage response for cancellation of brokerage order id {orderId} lean id {order.Id}"));
+                        }
                     }
                     else
                     {
@@ -1336,8 +1363,11 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
             }
 
             _aggregator.DisposeSafely();
-            _ibAutomater?.Stop();
-            _ibAutomater.DisposeSafely();
+            if (!_isRemoteGateway)
+            {
+                _ibAutomater?.Stop();
+                _ibAutomater.DisposeSafely();
+            }
 
             _messagingRateLimiter.DisposeSafely();
             _concurrentHistoryRequests.DisposeSafely();
@@ -1416,6 +1446,11 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
                 _aggregator = Composer.Instance.GetExportedValueByTypeName<IDataAggregator>(aggregatorName);
             }
             _account = account;
+            if (!IsFinancialAdvisor)
+            {
+                // no warning dialog to wait for, never hold an order back
+                _financialAdvisorFirstOrderAnswered.Set();
+            }
             _host = host;
             _port = port;
 
@@ -1430,9 +1465,7 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
             _subscriptionManager.SubscribeImpl += (s, t) => Subscribe(s);
             _subscriptionManager.UnsubscribeImpl += (s, t) => Unsubscribe(s);
 
-            Log.Trace("InteractiveBrokersBrokerage.InteractiveBrokersBrokerage(): Starting IB Automater...");
-
-            // start IB Gateway
+            // the automater instance is always created, it also provides the IB server reset times schedule
             var exportIbGatewayLogs = true; // Config.GetBool("ib-export-ibgateway-logs");
             _ibAutomater = new IBAutomater.IBAutomater(ibDirectory, ibVersion, userName, password, tradingMode, port, exportIbGatewayLogs);
             _ibAutomater.OutputDataReceived += OnIbAutomaterOutputDataReceived;
@@ -1440,23 +1473,41 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
             _ibAutomater.Exited += OnIbAutomaterExited;
             _ibAutomater.Restarted += OnIbAutomaterRestarted;
 
-            try
-            {
-                CheckIbAutomaterError(_ibAutomater.Start(false));
-            }
-            catch
-            {
-                // we are going the kill the deployment, let's clean up the automater
-                _ibAutomater.DisposeSafely();
-                throw;
-            }
-
             // default the weekly restart to one hour before FX market open (GetNextWeekendReconnectionTimeUtc)
             _weeklyRestartUtcTime = weeklyRestartUtcTime ?? _defaultWeeklyRestartUtcTime;
-            // schedule the weekly IB Gateway restart
-            StartGatewayWeeklyRestartTask();
+
+            _isRemoteGateway = !host.Equals("localhost", StringComparison.OrdinalIgnoreCase)
+                && !(IPAddress.TryParse(host, out var address) && IPAddress.IsLoopback(address));
+            if (_isRemoteGateway)
+            {
+                Log.Trace($"InteractiveBrokersBrokerage.InteractiveBrokersBrokerage(): remote IB Gateway host '{host}', skipping IB Automater");
+            }
+            else
+            {
+                Log.Trace("InteractiveBrokersBrokerage.InteractiveBrokersBrokerage(): Starting IB Automater...");
+
+                // start IB Gateway
+                try
+                {
+                    CheckIbAutomaterError(_ibAutomater.Start(false));
+                }
+                catch
+                {
+                    // we are going the kill the deployment, let's clean up the automater
+                    _ibAutomater.DisposeSafely();
+                    throw;
+                }
+
+                // schedule the weekly IB Gateway restart
+                StartGatewayWeeklyRestartTask();
+            }
 
             Log.Trace($"InteractiveBrokersBrokerage.InteractiveBrokersBrokerage(): Host: {host}, Port: {port}, Account: {account}, AgentDescription: {agentDescription}");
+
+            DeploymentDetailsHelper.Add("ib-account", account);
+            DeploymentDetailsHelper.Add("ib-user-name", userName);
+            DeploymentDetailsHelper.Add("ib-trading-mode", tradingMode);
+            DeploymentDetailsHelper.Add("ib-financial-advisors-group-filter", financialAdvisorsGroupFilter);
 
             _client = new IB.InteractiveBrokersClient(_signal);
 
@@ -1567,96 +1618,141 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
 
             CheckRateLimiting();
 
+            var isFirstFinancialAdvisorOrder = WaitForFinancialAdvisorFirstOrder();
+
+            var requestTimeUtc = DateTime.UtcNow;
             int ibOrderId;
             ManualResetEventSlim orderSubmittedEvent = null;
 
-            // Let's lock here so that getting request id and placing the order is atomic.
-            // If there are multiple threads placing orders at the same time, two threads could
-            // get ids but the one with the higher id could place the order first, making the other
-            // order request to fail, since IB will assume the previous request ID was already used.
-            lock (_nextValidIdLocker)
+            try
             {
-                if (needsNewId)
+                // Let's lock here so that getting request id and placing the order is atomic.
+                // If there are multiple threads placing orders at the same time, two threads could
+                // get ids but the one with the higher id could place the order first, making the other
+                // order request to fail, since IB will assume the previous request ID was already used.
+                lock (_nextValidIdLocker)
                 {
-                    // the order ids are generated for us by the SecurityTransactionManaer
-                    var id = GetNextId();
-                    foreach (var newOrder in orders)
+                    if (needsNewId)
                     {
-                        newOrder.BrokerId.Add(id.ToStringInvariant());
-                    }
-                    ibOrderId = id;
-                }
-                else if (order.BrokerId.Any())
-                {
-                    // this is *not* perfect code
-                    ibOrderId = Parse.Int(order.BrokerId[0]);
-                }
-                else
-                {
-                    throw new ArgumentException("Expected order with populated BrokerId for updating orders.");
-                }
-
-                Log.Trace($"InteractiveBrokersBrokerage.PlaceOrder(): Symbol: {order.Symbol.Value} Quantity: {order.Quantity}. Id: {order.Id}. BrokerId: {ibOrderId}");
-
-                _requestInformation[ibOrderId] = new RequestInformation
-                {
-                    RequestId = ibOrderId,
-                    RequestType = RequestType.PlaceOrder,
-                    AssociatedSymbol = order.Symbol,
-                    Message = $"[Id={ibOrderId}] IBPlaceOrder: {order.Symbol.Value} ({GetContractDescription(contract)} )"
-                };
-
-                if (order.Type == OrderType.OptionExercise)
-                {
-                    // IB API requires exerciseQuantity to be positive
-                    _client.ClientSocket.exerciseOptions(ibOrderId, contract, 1, decimal.ToInt32(order.AbsoluteQuantity), _account, 0,
-                        string.Empty, string.Empty, false);
-                }
-                else
-                {
-                    _pendingOrderResponse[ibOrderId] = orderSubmittedEvent = new ManualResetEventSlim(false);
-                    var ibOrder = ConvertOrder(orders, contract, ibOrderId);
-                    _client.ClientSocket.placeOrder(ibOrder.OrderId, contract, ibOrder);
-                }
-            }
-
-            if (order.Type != OrderType.OptionExercise)
-            {
-                var noSubmissionOrderTypes = _noSubmissionOrderTypes.Contains(order.Type);
-                if (!orderSubmittedEvent.Wait(noSubmissionOrderTypes ? _noSubmissionOrdersResponseTimeout : _responseTimeout))
-                {
-                    if (noSubmissionOrderTypes)
-                    {
-                        if (!_submissionOrdersWarningSent)
+                        // the order ids are generated for us by the SecurityTransactionManaer
+                        var id = GetNextId();
+                        foreach (var newOrder in orders)
                         {
-                            _submissionOrdersWarningSent = true;
-                            OnMessage(new BrokerageMessageEvent(BrokerageMessageType.Warning,
-                                "OrderSubmissionWarning",
-                                "Interactive Brokers does not send a submission event for some order types, in these cases if no error is detected Lean will generate the submission event."));
+                            newOrder.BrokerId.Add(id.ToStringInvariant());
                         }
+                        ibOrderId = id;
+                    }
+                    else if (order.BrokerId.Any())
+                    {
+                        // this is *not* perfect code
+                        ibOrderId = Parse.Int(order.BrokerId[0]);
+                    }
+                    else
+                    {
+                        throw new ArgumentException("Expected order with populated BrokerId for updating orders.");
+                    }
 
-                        if (_pendingOrderResponse.TryRemove(ibOrderId, out var _))
+                    Log.Trace($"InteractiveBrokersBrokerage.PlaceOrder(): Symbol: {order.Symbol.Value} Quantity: {order.Quantity}. Id: {order.Id}. BrokerId: {ibOrderId}");
+
+                    _requestInformation[ibOrderId] = new RequestInformation
+                    {
+                        RequestId = ibOrderId,
+                        RequestType = RequestType.PlaceOrder,
+                        AssociatedSymbol = order.Symbol,
+                        Message = $"[Id={ibOrderId}] IBPlaceOrder: {order.Symbol.Value} ({GetContractDescription(contract)} )"
+                    };
+
+                    if (order.Type == OrderType.OptionExercise)
+                    {
+                        // IB API requires exerciseQuantity to be positive
+                        _client.ClientSocket.exerciseOptions(ibOrderId, contract, 1, decimal.ToInt32(order.AbsoluteQuantity), _account, 0,
+                            string.Empty, string.Empty, false);
+                    }
+                    else
+                    {
+                        _pendingOrderResponse[ibOrderId] = orderSubmittedEvent = new ManualResetEventSlim(false);
+                        var ibOrder = ConvertOrder(orders, contract, ibOrderId);
+                        _client.ClientSocket.placeOrder(ibOrder.OrderId, contract, ibOrder);
+                    }
+                }
+
+                if (order.Type != OrderType.OptionExercise)
+                {
+                    var noSubmissionOrderTypes = _noSubmissionOrderTypes.Contains(order.Type);
+                    if (!orderSubmittedEvent.Wait(noSubmissionOrderTypes ? _noSubmissionOrdersResponseTimeout : _responseTimeout))
+                    {
+                        if (noSubmissionOrderTypes)
                         {
-                            orderSubmittedEvent.DisposeSafely();
-
-                            var orderEvents = orders.Where(order => order != null).Select(order => new OrderEvent(order, DateTime.UtcNow, OrderFee.Zero)
+                            if (!_submissionOrdersWarningSent)
                             {
-                                Status = OrderStatus.Submitted,
-                                Message = "Lean Generated Interactive Brokers Order Event"
-                            }).ToList();
-                            OnOrderEvents(orderEvents);
+                                _submissionOrdersWarningSent = true;
+                                OnMessage(new BrokerageMessageEvent(BrokerageMessageType.Warning,
+                                    "OrderSubmissionWarning",
+                                    "Interactive Brokers does not send a submission event for some order types, in these cases if no error is detected Lean will generate the submission event."));
+                            }
+
+                            if (_pendingOrderResponse.TryRemove(ibOrderId, out var _))
+                            {
+                                orderSubmittedEvent.DisposeSafely();
+
+                                var orderEvents = orders.Where(order => order != null).Select(order => new OrderEvent(order, DateTime.UtcNow, OrderFee.Zero)
+                                {
+                                    Status = OrderStatus.Submitted,
+                                    Message = "Lean Generated Interactive Brokers Order Event"
+                                }).ToList();
+                                OnOrderEvents(orderEvents);
+                            }
+                        }
+                        else
+                        {
+                            var reason = $"Timeout waiting for brokerage response for brokerage order id {ibOrderId} lean id {order.Id}";
+                            if (_lastGatewayRestartTimeUtc >= requestTimeUtc || IsRestartInProgress())
+                            {
+                                reason += ". An IB Gateway restart overlapped the request, which likely never reached IB. " +
+                                    "Consider avoiding order requests around the gateway's scheduled restart time.";
+                            }
+                            OnMessage(new BrokerageMessageEvent(BrokerageMessageType.Error, "NoBrokerageResponse", reason));
                         }
                     }
                     else
                     {
-                        OnMessage(new BrokerageMessageEvent(BrokerageMessageType.Error, "NoBrokerageResponse", $"Timeout waiting for brokerage response for brokerage order id {ibOrderId} lean id {order.Id}"));
+                        orderSubmittedEvent.DisposeSafely();
                     }
                 }
-                else
+            }
+            finally
+            {
+                if (isFirstFinancialAdvisorOrder)
                 {
-                    orderSubmittedEvent.DisposeSafely();
+                    // release the batch even when this order timed out
+                    _financialAdvisorFirstOrderAnswered.Set();
                 }
             }
+        }
+
+        /// <summary>
+        /// Holds a Financial Advisor order back until the first order of the deployment has been answered
+        /// </summary>
+        /// <returns>True for the first order, whose caller must signal
+        /// <see cref="_financialAdvisorFirstOrderAnswered"/></returns>
+        private bool WaitForFinancialAdvisorFirstOrder()
+        {
+            if (_financialAdvisorFirstOrderAnswered.IsSet)
+            {
+                return false;
+            }
+
+            if (Interlocked.CompareExchange(ref _financialAdvisorFirstOrderClaimed, 1, 0) == 0)
+            {
+                return true;
+            }
+
+            Log.Trace("InteractiveBrokersBrokerage.WaitForFinancialAdvisorFirstOrder(): waiting for the first order to be answered");
+
+            // cannot take longer than the first order's own timeout
+            _financialAdvisorFirstOrderAnswered.Wait(_responseTimeout, _cancellationTokenSource.Token);
+
+            return false;
         }
 
         /// <summary>
@@ -2060,6 +2156,11 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
                 brokerageMessageType = BrokerageMessageType.Warning;
             }
 
+            // set by the error 200 handling below when the message was already surfaced for the symbol, note
+            // that it can't just return in that case: the order invalidation must run for every rejected
+            // order, even a repeated rejection of an asset we already reported as unsupported
+            var alreadyReportedUnsupportedAsset = false;
+
             // code 1100 is a connection failure, we'll wait a minute before exploding gracefully
             if (errorCode == 1100)
             {
@@ -2155,10 +2256,7 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
                         {
                             lock (_unsupportedAssets)
                             {
-                                if (!_unsupportedAssets.Add($"{requestInfo.AssociatedSymbol.Value}-{requestInfo.AssociatedSymbol.SecurityType}"))
-                                {
-                                    return;
-                                }
+                                alreadyReportedUnsupportedAsset = !_unsupportedAssets.Add($"{requestInfo.AssociatedSymbol.Value}-{requestInfo.AssociatedSymbol.SecurityType}");
                             }
                         }
 
@@ -2171,7 +2269,10 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
                 _competingSessionErrorHandler.Value.Handle(DateTime.UtcNow, errorCode, errorMsg);
             }
 
-            if (InvalidatingCodes.Contains(errorCode))
+            // error 200 is not an invalidating code: unlike the codes in the collection it answers any request
+            // type (e.g. contract details or market data), so it's only an order rejection when we know it is
+            // answering an order request
+            if (InvalidatingCodes.Contains(errorCode) || (errorCode == 200 && requestInfo?.IsOrderRequest == true))
             {
                 // let's unblock the waiting thread right away
                 if (_pendingOrderResponse.TryRemove(requestId, out var eventSlim))
@@ -2198,7 +2299,7 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
                 }
             }
 
-            if (!FilteredCodes.Contains(errorCode) && errorCode != -1)
+            if (!alreadyReportedUnsupportedAsset && !FilteredCodes.Contains(errorCode) && errorCode != -1)
             {
                 OnMessage(new BrokerageMessageEvent(brokerageMessageType, errorCode, errorMsg));
             }
@@ -3385,6 +3486,10 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
                 {
                     contract.Exchange = "OSE.JPN";
                 }
+                else if(string.Equals(symbol.ID.Market, Market.KRX, StringComparison.InvariantCultureIgnoreCase))
+                {
+                    contract.Exchange = "KSE";
+                }
                 else
                 {
                     contract.Exchange = IndexSymbol.GetIndexExchange(symbol);
@@ -4327,10 +4432,10 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
             // our subscriptions are removed without any sort of notice.
             return
                 (securityType == SecurityType.Equity && market == Market.USA) ||
-                (securityType == SecurityType.Forex && market == Market.Oanda) ||
+                (securityType == SecurityType.Forex && (market == Market.Oanda || market == Market.InteractiveBrokers)) ||
                 (securityType == SecurityType.Option && market == Market.USA) ||
                 (securityType == SecurityType.IndexOption && market == Market.USA) ||
-                (securityType == SecurityType.Index && (market == Market.USA || market == Market.EUREX || market == Market.OSE || market == Market.HKFE)) ||
+                (securityType == SecurityType.Index && (market == Market.USA || market == Market.EUREX || market == Market.OSE || market == Market.HKFE || market == Market.KRX)) ||
                 (securityType == SecurityType.FutureOption) ||
                 (securityType == SecurityType.Future) ||
                 (securityType == SecurityType.Cfd && market == Market.InteractiveBrokers);
@@ -5205,7 +5310,7 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
                 var resultHandler = Composer.Instance.GetPart<IResultHandler>();
                 resultHandler?.DebugMessage("Logging into account. Check phone for two-factor authentication verification...");
             }
-            else if (e.Data.Contains("2FA maximum attempts reached", StringComparison.InvariantCultureIgnoreCase) || 
+            else if (e.Data.Contains("2FA maximum attempts reached", StringComparison.InvariantCultureIgnoreCase) ||
                      e.Data.Contains("IB Automater initialization timeout", StringComparison.InvariantCultureIgnoreCase))
             {
                 Task.Factory.StartNew(() =>
@@ -5215,6 +5320,13 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
                     OnMessage(BrokerageMessageEvent.Disconnected(message));
                     OnMessage(new BrokerageMessageEvent(BrokerageMessageType.ActionRequired, "2FAAuthRequired", message));
                 });
+            }
+            else if (e.Data.Contains(OrderConfirmationWindowMarker, StringComparison.InvariantCultureIgnoreCase))
+            {
+                // IBAutomater auto-accepted an order confirmation/warning window, let the user know
+                var index = e.Data.IndexOf(OrderConfirmationWindowMarker, StringComparison.InvariantCultureIgnoreCase);
+                var message = e.Data.Substring(index + OrderConfirmationWindowMarker.Length).Trim();
+                OnMessage(new BrokerageMessageEvent(BrokerageMessageType.Warning, "OrderConfirmationWindow", message));
             }
 
             Log.Trace($"InteractiveBrokersBrokerage.OnIbAutomaterOutputDataReceived(): {e.Data}");
@@ -5246,10 +5358,10 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
         {
             try
             {
-                if (_isDisposeCalled || IsRestartInProgress())
+                if (_isDisposeCalled || _isRemoteGateway || IsRestartInProgress())
                 {
-                    // if we are disposed or we already triggered the restart skip a new call
-                    var message = _isDisposeCalled ? "we are disposed" : "restart task already scheduled";
+                    // if we are disposed, the gateway is remote or we already triggered the restart skip a new call
+                    var message = _isDisposeCalled ? "we are disposed" : _isRemoteGateway ? "gateway is remote" : "restart task already scheduled";
                     Log.Trace($"InteractiveBrokersBrokerage.StartGatewayRestartTask(): skipped request: {message}");
                     return;
                 }
@@ -5495,6 +5607,8 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
         private void OnIbAutomaterRestarted(object sender, EventArgs e)
         {
             Log.Trace("InteractiveBrokersBrokerage.OnIbAutomaterRestarted()");
+
+            _lastGatewayRestartTimeUtc = DateTime.UtcNow;
 
             _stateManager.Reset();
             StopGatewayRestartTask();
@@ -5824,7 +5938,7 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
         // these are fatal errors from IB
         private static readonly HashSet<int> ErrorCodes = new HashSet<int>
         {
-            100, 101, 103, 138, 139, 142, 143, 144, 145, 200, 203, 300,301,302,306,308,309,310,311,316,317,320,321,322,323,324,326,327,330,331,332,333,344,346,354,357,365,366,381,384,401,414,431,432,438,501,502,503,504,505,506,507,508,510,511,512,513,514,515,516,517,518,519,520,521,522,523,524,525,526,527,528,529,530,531,10000,10001,10005,10013,10015,10016,10021,10022,10023,10024,10025,10026,10027,1300
+            100, 101, 103, 138, 139, 142, 143, 144, 145, 200, 203, 300,301,302,306,308,309,310,311,316,317,320,321,322,323,324,326,327,330,331,332,333,344,346,354,357,365,366,381,384,401,414,431,432,438,460,501,502,503,504,505,506,507,508,510,511,512,513,514,515,516,517,518,519,520,521,522,523,524,525,526,527,528,529,530,531,10000,10001,10005,10013,10015,10016,10021,10022,10023,10024,10025,10026,10027,1300
         };
 
         // these are warning messages from IB
@@ -5837,7 +5951,9 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
         private static readonly HashSet<int> InvalidatingCodes = new HashSet<int>
         {
             104, // Can't modify a filled order
+            10147, // OrderId <OrderId> that needs to be cancelled is not found.
             10148, // OrderId <OrderId> that needs to be cancelled can not be cancelled, state:
+            460, // No trading permissions
             105, 106, 107, 109, 110, 111, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 129, 131, 132, 133, 134, 135, 136, 137, 140, 141, 146, 147, 148, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 163, 167, 168, 201,312,313,314,315,325,328,329,334,335,336,337,338,339,340,341,342,343,345,347,348,349,350,352,353,355,356,358,359,360,361,362,363,364,367,368,369,370,371,372,373,374,375,376,377,378,379,380,382,383,387,388,389,390,391,392,393,394,395,396,397,398,400,401,402,403,405,406,407,408,409,410,411,412,413,417,418,419,421,423,424,427,428,429,433,434,435,436,437,439,440,441,442,443,444,445,446,447,448,449,463,10002,10006,10007,10008,10009,10010,10011,10012,10014,10020,10058,2102
         };
 
@@ -5846,6 +5962,7 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
         {
             // 'Request Account Data Sending Error' can happen while connecting sometimes let's ignore it else it bubbles up to the user even if we connected successfully later
             542,
+            10147, // we are going to handle it as an order event
             10148, // we are going to handle it as an order event
             1100, 1101, 1102, 2103, 2104, 2105, 2106, 2107, 2108, 2119, 2157, 2158, IB.CompetingLiveSessionMarketDataErrorHandler.ErrorCode
         };
@@ -5879,6 +5996,12 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
             public string Message { get; set; }
 
             public HistoryRequest? HistoryRequest { get; set; }
+
+            /// <summary>
+            /// Whether the request was placing, updating or cancelling an order, so its request id is an
+            /// order id and an error answering it can be reported as an order rejection
+            /// </summary>
+            public bool IsOrderRequest => RequestType is RequestType.PlaceOrder or RequestType.UpdateOrder or RequestType.CancelOrder;
         }
     }
 }
