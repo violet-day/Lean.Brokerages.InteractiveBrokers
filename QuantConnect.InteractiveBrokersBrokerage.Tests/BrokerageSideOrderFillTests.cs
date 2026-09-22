@@ -57,10 +57,12 @@ namespace QuantConnect.Tests.Brokerages.InteractiveBrokers
                 new Execution
                 {
                     OrderId = 0,
+                    ClientId = 0,
                     PermId = 1221610158,
                     ExecId = "external-execution",
                     Side = "SLD",
                     Shares = 100,
+                    CumQty = 100,
                     Price = 0.6109
                 });
 
@@ -78,6 +80,44 @@ namespace QuantConnect.Tests.Brokerages.InteractiveBrokers
             StringAssert.Contains("Side: SLD", message.Message);
             StringAssert.Contains("Quantity: 100", message.Message);
             StringAssert.Contains("Price: 0.6109", message.Message);
+        }
+
+        [Test]
+        public void BrokerageSideFillEmitsMessageFromOrderStatusWithoutExecutionDetails()
+        {
+            using var brokerage = new InteractiveBrokersBrokerage();
+            var messages = new List<BrokerageMessageEvent>();
+            brokerage.Message += (_, message) => messages.Add(message);
+
+            var orderStatus = new IB.OrderStatusEventArgs(
+                0,
+                IB.OrderStatus.Filled,
+                7,
+                0,
+                0.94,
+                674826498,
+                0,
+                0.94,
+                0,
+                string.Empty,
+                0);
+
+            var reportOrderStatusFill = typeof(InteractiveBrokersBrokerage)
+                .GetMethod(
+                    "ReportBrokerageSideOrderStatusFill",
+                    BindingFlags.NonPublic | BindingFlags.Instance);
+            reportOrderStatusFill.Invoke(brokerage, new object[] { orderStatus });
+            reportOrderStatusFill.Invoke(brokerage, new object[] { orderStatus });
+
+            var message = messages.Single();
+            Assert.AreEqual(BrokerageMessageType.Information, message.Type);
+            Assert.AreEqual("BrokerageSideOrderFill", message.Code);
+            StringAssert.Contains("BrokerageOrderId: 0", message.Message);
+            StringAssert.Contains("PermanentId: 674826498", message.Message);
+            StringAssert.Contains("ClientId: 0", message.Message);
+            StringAssert.Contains("Status: Filled", message.Message);
+            StringAssert.Contains("CumulativeQuantity: 7", message.Message);
+            StringAssert.Contains("AverageFillPrice: 0.94", message.Message);
         }
 
         private static void SetPrivateFieldValue(object instance, string name, object value)

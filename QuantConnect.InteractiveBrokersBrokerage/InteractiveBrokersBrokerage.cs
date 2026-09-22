@@ -193,6 +193,10 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
         // tracks commission reports before executions, map: execId -> commission report
         private readonly ConcurrentDictionary<string, CommissionAndFeesReport> _commissionReports = new ConcurrentDictionary<string, CommissionAndFeesReport>();
 
+        // tracks brokerage-side fills reported by cumulative order status updates so duplicate
+        // IB callbacks and later execution details do not emit duplicate reconciliation messages
+        private readonly ConcurrentDictionary<(int ClientId, int OrderId, long PermanentId), int> _brokerageSideOrderCumulativeFilledQuantities = new();
+
         // holds account properties, cash balances and holdings for the account
         private readonly InteractiveBrokersAccountData _accountData = new InteractiveBrokersAccountData();
 
@@ -2415,6 +2419,10 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
 
                 if (!TryGetLeanOrder(update.OrderId, nameof(HandleOrderStatusUpdates), out var orders))
                 {
+                    if (!_skippedOrdersByFaGroup.ContainsKey(update.OrderId))
+                    {
+                        ReportBrokerageSideOrderStatusFill(update);
+                    }
                     return;
                 }
 
@@ -2481,6 +2489,73 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
             catch (Exception err)
             {
                 Log.Error("InteractiveBrokersBrokerage.HandleOrderStatusUpdates(): " + err);
+            }
+        }
+
+        private void ReportBrokerageSideOrderStatusFill(IB.OrderStatusEventArgs update)
+        {
+            if (!TryRegisterBrokerageSideOrderFill(
+                update.ClientId,
+                update.OrderId,
+                update.PermId,
+                update.Filled))
+            {
+                return;
+            }
+
+            var message = $"Detected brokerage-side fill from an order status update without a matching LEAN order. " +
+                $"BrokerageOrderId: {update.OrderId}, " +
+                $"PermanentId: {update.PermId}, " +
+                $"ClientId: {update.ClientId}, " +
+                $"Status: {update.Status}, " +
+                $"CumulativeQuantity: {update.Filled}, " +
+                $"AverageFillPrice: {update.AverageFillPrice}";
+            Log.Trace($"InteractiveBrokersBrokerage.HandleOrderStatusUpdates(): {message}");
+            OnMessage(new BrokerageMessageEvent(
+                BrokerageMessageType.Information,
+                "BrokerageSideOrderFill",
+                message));
+        }
+
+        private bool TryRegisterBrokerageSideOrderFill(
+            int clientId,
+            int brokerageOrderId,
+            long permanentOrderId,
+            int cumulativeFilledQuantity)
+        {
+            if (cumulativeFilledQuantity <= 0)
+            {
+                return false;
+            }
+
+            var brokerageOrderKey = (clientId, brokerageOrderId, permanentOrderId);
+            while (true)
+            {
+                if (!_brokerageSideOrderCumulativeFilledQuantities.TryGetValue(
+                    brokerageOrderKey,
+                    out var previousCumulativeFilledQuantity))
+                {
+                    if (_brokerageSideOrderCumulativeFilledQuantities.TryAdd(
+                        brokerageOrderKey,
+                        cumulativeFilledQuantity))
+                    {
+                        return true;
+                    }
+                    continue;
+                }
+
+                if (cumulativeFilledQuantity <= previousCumulativeFilledQuantity)
+                {
+                    return false;
+                }
+
+                if (_brokerageSideOrderCumulativeFilledQuantities.TryUpdate(
+                    brokerageOrderKey,
+                    cumulativeFilledQuantity,
+                    previousCumulativeFilledQuantity))
+                {
+                    return true;
+                }
             }
         }
 
@@ -2774,6 +2849,20 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
                 }
                 else if (orders.Count == 0)
                 {
+                    var cumulativeFilledQuantity = Convert.ToInt32(executionDetails.Execution.CumQty);
+                    if (cumulativeFilledQuantity == 0)
+                    {
+                        cumulativeFilledQuantity = Convert.ToInt32(executionDetails.Execution.Shares);
+                    }
+                    if (!TryRegisterBrokerageSideOrderFill(
+                        executionDetails.Execution.ClientId,
+                        executionDetails.Execution.OrderId,
+                        executionDetails.Execution.PermId,
+                        cumulativeFilledQuantity))
+                    {
+                        return null;
+                    }
+
                     var message = $"Detected brokerage-side fill without a matching LEAN order. " +
                         $"BrokerageOrderId: {executionDetails.Execution.OrderId}, " +
                         $"PermanentId: {executionDetails.Execution.PermId}, " +
