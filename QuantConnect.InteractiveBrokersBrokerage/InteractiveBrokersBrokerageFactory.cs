@@ -15,6 +15,7 @@
 
 using System;
 using System.Collections.Generic;
+using QuantConnect.Brokerages;
 using QuantConnect.Configuration;
 using QuantConnect.Interfaces;
 using QuantConnect.Packets;
@@ -59,6 +60,14 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
         /// </summary>
         /// <param name="orderProvider">The order provider</param>
         public override IBrokerageModel GetBrokerageModel(IOrderProvider orderProvider) => new InteractiveBrokersBrokerageModel();
+
+        /// <summary>
+        /// Creates the brokerage message handler used by live algorithms
+        /// </summary>
+        public override IBrokerageMessageHandler CreateBrokerageMessageHandler(IAlgorithm algorithm, AlgorithmNodePacket job, IApi api)
+        {
+            return new InteractiveBrokersBrokerageMessageHandler(algorithm, job, api);
+        }
 
         /// <summary>
         /// Creates a new IBrokerage instance and set ups the environment for the brokerage
@@ -142,6 +151,19 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
         /// <filterpriority>2</filterpriority>
         public override void Dispose()
         {
+        }
+
+        private sealed class InteractiveBrokersBrokerageMessageHandler : DefaultBrokerageMessageHandler
+        {
+            public InteractiveBrokersBrokerageMessageHandler(IAlgorithm algorithm, AlgorithmNodePacket job, IApi api)
+                : base(algorithm, job, api)
+            {
+            }
+
+            public override bool HandleOrder(NewBrokerageOrderNotificationEventArgs eventArgs)
+            {
+                return true;
+            }
         }
     }
 }

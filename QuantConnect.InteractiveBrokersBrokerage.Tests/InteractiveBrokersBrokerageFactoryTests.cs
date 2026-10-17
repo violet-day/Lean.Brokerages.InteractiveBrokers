@@ -13,10 +13,13 @@
  * limitations under the License.
 */
 
+using System;
 using NUnit.Framework;
 using QuantConnect.Algorithm;
+using QuantConnect.Brokerages;
 using QuantConnect.Brokerages.InteractiveBrokers;
 using QuantConnect.Interfaces;
+using QuantConnect.Orders;
 using QuantConnect.Packets;
 using QuantConnect.Util;
 
@@ -45,6 +48,16 @@ namespace QuantConnect.Tests.Brokerages.InteractiveBrokers
                     Assert.IsTrue(brokerage.IsConnected);
                 }
             }
+        }
+
+        [Test]
+        public void AcceptsBrokerageSideOrders()
+        {
+            using var factory = new InteractiveBrokersBrokerageFactory();
+            var messageHandler = factory.CreateBrokerageMessageHandler(AlgorithmDependency, null, null);
+            var order = new MarketOrder(Symbols.SPY, 1, DateTime.UtcNow);
+
+            Assert.IsTrue(messageHandler.HandleOrder(new NewBrokerageOrderNotificationEventArgs(order)));
         }
 
         class InteractiveBrokersBrokerageFactoryAlgorithmDependency : QCAlgorithm
