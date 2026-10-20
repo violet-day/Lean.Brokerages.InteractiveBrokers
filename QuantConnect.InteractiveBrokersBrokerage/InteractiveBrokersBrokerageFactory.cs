@@ -15,6 +15,7 @@
 
 using System;
 using System.Collections.Generic;
+using QuantConnect.Brokerages;
 using QuantConnect.Configuration;
 using QuantConnect.Interfaces;
 using QuantConnect.Packets;
@@ -61,6 +62,14 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
         public override IBrokerageModel GetBrokerageModel(IOrderProvider orderProvider) => new InteractiveBrokersBrokerageModel();
 
         /// <summary>
+        /// Creates the brokerage message handler used by live algorithms
+        /// </summary>
+        public override IBrokerageMessageHandler CreateBrokerageMessageHandler(IAlgorithm algorithm, AlgorithmNodePacket job, IApi api)
+        {
+            return new InteractiveBrokersBrokerageMessageHandler(algorithm, job, api);
+        }
+
+        /// <summary>
         /// Creates a new IBrokerage instance and set ups the environment for the brokerage
         /// </summary>
         /// <param name="job">The job packet to create the brokerage for</param>
@@ -94,6 +103,13 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
                 !string.IsNullOrEmpty(weeklyRestartUtcTimeStr))
             {
                 weeklyRestartUtcTime = TimeSpan.Parse(weeklyRestartUtcTimeStr);
+                // leaves room for the check 5 minutes earlier and a login with 2FA retries before 23:45 UTC
+                var maxWeeklyRestartUtcTime = new TimeSpan(23, 30, 0);
+                if (weeklyRestartUtcTime > maxWeeklyRestartUtcTime)
+                {
+                    throw new Exception($"The requested weekly restart time {weeklyRestartUtcTime:hh\\:mm} UTC is too close to the IB Gateway daily restart at 23:45 UTC and the weekly 2FA login would be skipped. " +
+                        $"Please choose any time up to {maxWeeklyRestartUtcTime:hh\\:mm} UTC.");
+                }
             }
 
             if (errors.Count != 0)
@@ -135,6 +151,19 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
         /// <filterpriority>2</filterpriority>
         public override void Dispose()
         {
+        }
+
+        private sealed class InteractiveBrokersBrokerageMessageHandler : DefaultBrokerageMessageHandler
+        {
+            public InteractiveBrokersBrokerageMessageHandler(IAlgorithm algorithm, AlgorithmNodePacket job, IApi api)
+                : base(algorithm, job, api)
+            {
+            }
+
+            public override bool HandleOrder(NewBrokerageOrderNotificationEventArgs eventArgs)
+            {
+                return true;
+            }
         }
     }
 }
