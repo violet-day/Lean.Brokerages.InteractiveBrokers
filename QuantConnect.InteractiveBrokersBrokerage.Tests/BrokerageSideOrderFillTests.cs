@@ -13,6 +13,7 @@
  * limitations under the License.
  */
 
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
@@ -20,10 +21,13 @@ using System.Reflection;
 using IBApi;
 using NUnit.Framework;
 
+using QuantConnect.Algorithm;
 using QuantConnect.Brokerages;
 using QuantConnect.Brokerages.InteractiveBrokers;
 using QuantConnect.Lean.Engine.TransactionHandlers;
 using QuantConnect.Orders;
+using QuantConnect.Orders.Fees;
+using QuantConnect.Statistics;
 
 using IB = QuantConnect.Brokerages.InteractiveBrokers.Client;
 
@@ -191,6 +195,58 @@ namespace QuantConnect.Tests.Brokerages.InteractiveBrokers
             StringAssert.Contains("Status: Filled", message.Message);
             StringAssert.Contains("CumulativeQuantity: 7", message.Message);
             StringAssert.Contains("AverageFillPrice: 0.94", message.Message);
+        }
+
+        [Test]
+        public void RestoredHoldingSeedsTradeBuilderOnce()
+        {
+            using var brokerage = new InteractiveBrokersBrokerage();
+            var algorithm = new QCAlgorithm();
+            SetPrivateFieldValue(brokerage, "_algorithm", algorithm);
+
+            var symbol = new Symbol(
+                SecurityIdentifier.GenerateEquity("XLAB", Market.USA, mapSymbol: false),
+                "XLAB");
+            var restoredAtUtc = new DateTime(2026, 10, 19, 14, 28, 18, DateTimeKind.Utc);
+            var holdings = new List<Holding>
+            {
+                new()
+                {
+                    Symbol = symbol,
+                    Quantity = -1153,
+                    AveragePrice = 2.579m
+                }
+            };
+
+            var seedTradeBuilderFromHoldings = typeof(InteractiveBrokersBrokerage)
+                .GetMethod("SeedTradeBuilderFromHoldings", BindingFlags.NonPublic | BindingFlags.Instance);
+            seedTradeBuilderFromHoldings.Invoke(brokerage, new object[] { holdings, restoredAtUtc });
+            seedTradeBuilderFromHoldings.Invoke(brokerage, new object[] { holdings, restoredAtUtc });
+
+            var closedAtUtc = restoredAtUtc.AddSeconds(22);
+            algorithm.TradeBuilder.ProcessFill(
+                new OrderEvent(
+                    1,
+                    symbol,
+                    closedAtUtc,
+                    OrderStatus.Filled,
+                    OrderDirection.Buy,
+                    2.55m,
+                    1153,
+                    OrderFee.Zero),
+                1m,
+                12.683m);
+
+            var trade = algorithm.TradeBuilder.ClosedTrades.Single();
+            Assert.AreEqual(TradeDirection.Short, trade.Direction);
+            Assert.AreEqual(1153, trade.Quantity);
+            Assert.AreEqual(2.579m, trade.EntryPrice);
+            Assert.AreEqual(restoredAtUtc, trade.EntryTime);
+            Assert.AreEqual(2.55m, trade.ExitPrice);
+            Assert.AreEqual(closedAtUtc, trade.ExitTime);
+            Assert.AreEqual(33.44m, trade.ProfitLoss);
+            Assert.AreEqual(12.683m, trade.TotalFees);
+            Assert.IsFalse(algorithm.TradeBuilder.HasOpenPosition(symbol));
         }
 
         private static IB.ExecutionDetailsEventArgs CreateExecutionDetails()
