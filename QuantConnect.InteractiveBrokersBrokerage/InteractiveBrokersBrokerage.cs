@@ -197,10 +197,6 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
         // IB callbacks and later execution details do not emit duplicate reconciliation messages
         private readonly ConcurrentDictionary<(int ClientId, int OrderId, long PermanentId), int> _brokerageSideOrderCumulativeFilledQuantities = new();
 
-        // restored holdings are already applied to the portfolio by the setup handler, so they are
-        // seeded directly into the trade builder without emitting another portfolio-changing fill
-        private int _restoredHoldingsSeeded;
-
         // holds account properties, cash balances and holdings for the account
         private readonly InteractiveBrokersAccountData _accountData = new InteractiveBrokersAccountData();
 
@@ -773,48 +769,10 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
                 }
             }
 
-            SeedTradeBuilderFromHoldings(holdings, utcNow);
-
             // Prevent holdings calculation every time we receive portfolio updates from IB
             _loadExistingHoldings = false;
 
             return holdings;
-        }
-
-        private void SeedTradeBuilderFromHoldings(List<Holding> holdings, DateTime utcNow)
-        {
-            if (_algorithm == null || Interlocked.Exchange(ref _restoredHoldingsSeeded, 1) != 0)
-            {
-                return;
-            }
-
-            for (var holdingIndex = 0; holdingIndex < holdings.Count; holdingIndex++)
-            {
-                var holding = holdings[holdingIndex];
-                var restoredHoldingOrderId = -(holdingIndex + 1);
-                var restoredHoldingFill = new OrderEvent(
-                    restoredHoldingOrderId,
-                    holding.Symbol,
-                    utcNow,
-                    OrderStatus.Filled,
-                    holding.Quantity > 0 ? OrderDirection.Buy : OrderDirection.Sell,
-                    holding.AveragePrice,
-                    holding.Quantity,
-                    OrderFee.Zero,
-                    "Restored brokerage holding");
-                var contractMultiplier = GetSymbolProperties(holding.Symbol).ContractMultiplier;
-
-                _algorithm.TradeBuilder.ProcessFill(
-                    restoredHoldingFill,
-                    holding.ConversionRate ?? 1m,
-                    0m,
-                    contractMultiplier);
-
-                Log.Trace(
-                    $"InteractiveBrokersBrokerage.SeedTradeBuilderFromHoldings(): status=seeded " +
-                    $"symbol={holding.Symbol.Value} quantity={holding.Quantity} " +
-                    $"average_price={holding.AveragePrice} order_id={restoredHoldingOrderId}");
-            }
         }
 
         /// <summary>
