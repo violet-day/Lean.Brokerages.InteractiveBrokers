@@ -26,6 +26,7 @@ using QuantConnect.Lean.Engine.TransactionHandlers;
 using QuantConnect.Orders;
 
 using IB = QuantConnect.Brokerages.InteractiveBrokers.Client;
+using LeanOrder = QuantConnect.Orders.Order;
 
 namespace QuantConnect.Tests.Brokerages.InteractiveBrokers
 {
@@ -193,13 +194,144 @@ namespace QuantConnect.Tests.Brokerages.InteractiveBrokers
             StringAssert.Contains("AverageFillPrice: 0.94", message.Message);
         }
 
+        [Test]
+        public void RegisteredBrokerageSideOrderEmitsFillFromOrderStatusWithoutExecutionDetails()
+        {
+            using var brokerage = new InteractiveBrokersBrokerage();
+            var orderProvider = new OrderProvider();
+            SetPrivateFieldValue(brokerage, "_orderProvider", orderProvider);
+            SetPrivateFieldValue(
+                brokerage,
+                "_symbolMapper",
+                new InteractiveBrokersSymbolMapper(
+                    new Dictionary<SecurityType, Dictionary<string, string>>()));
+
+            LeanOrder registeredOrder = null;
+            brokerage.NewBrokerageOrderNotification += (_, notification) =>
+            {
+                registeredOrder = notification.Order;
+                registeredOrder.Status = OrderStatus.Submitted;
+                orderProvider.Add(registeredOrder);
+            };
+
+            var orderEvents = new List<OrderEvent>();
+            brokerage.OrdersStatusChanged += (_, events) => orderEvents.AddRange(events);
+
+            RegisterBrokerageSideOpenOrder(
+                brokerage,
+                CreateOpenOrderEvent(0, 937983719, IB.ActionSide.Buy, 100));
+
+            var orderStatus = new IB.OrderStatusEventArgs(
+                0,
+                IB.OrderStatus.Filled,
+                100,
+                0,
+                3.55,
+                937983719,
+                0,
+                3.55,
+                0,
+                string.Empty,
+                0);
+
+            var emitBrokerageSideOrderStatusFill = typeof(InteractiveBrokersBrokerage)
+                .GetMethod("EmitBrokerageSideOrderStatusFill", BindingFlags.NonPublic | BindingFlags.Instance);
+            emitBrokerageSideOrderStatusFill.Invoke(brokerage, new object[] { orderStatus, new List<LeanOrder> { registeredOrder } });
+            emitBrokerageSideOrderStatusFill.Invoke(brokerage, new object[] { orderStatus, new List<LeanOrder> { registeredOrder } });
+
+            var fill = orderEvents.Single();
+            Assert.AreEqual(registeredOrder.Id, fill.OrderId);
+            Assert.AreEqual(OrderStatus.Filled, fill.Status);
+            Assert.AreEqual(100, fill.FillQuantity);
+            Assert.AreEqual(3.55m, fill.FillPrice);
+
+            var executionDetails = CreateExecutionDetails("DAVI", 937983719, IB.ActionSide.Buy, 100, 3.55);
+            var matchedOrder = (LeanOrder)typeof(InteractiveBrokersBrokerage)
+                .GetMethod("GetOrder", BindingFlags.NonPublic | BindingFlags.Instance)
+                .Invoke(brokerage, new object[] { executionDetails });
+            typeof(InteractiveBrokersBrokerage)
+                .GetMethod("EmitOrderFill", BindingFlags.NonPublic | BindingFlags.Instance)
+                .Invoke(brokerage, new object[]
+                {
+                    matchedOrder,
+                    executionDetails,
+                    new CommissionAndFeesReport { CommissionAndFees = 1, Currency = "USD" },
+                    false
+                });
+
+            Assert.AreEqual(1, orderEvents.Count);
+        }
+
+        [Test]
+        public void BrokerageSideOrdersWithReusedBrokerageOrderIdAreMatchedByPermanentId()
+        {
+            using var brokerage = new InteractiveBrokersBrokerage();
+            var orderProvider = new OrderProvider();
+            SetPrivateFieldValue(brokerage, "_orderProvider", orderProvider);
+            SetPrivateFieldValue(
+                brokerage,
+                "_symbolMapper",
+                new InteractiveBrokersSymbolMapper(
+                    new Dictionary<SecurityType, Dictionary<string, string>>()));
+
+            var registeredOrders = new List<LeanOrder>();
+            brokerage.NewBrokerageOrderNotification += (_, notification) =>
+            {
+                notification.Order.Status = OrderStatus.Submitted;
+                orderProvider.Add(notification.Order);
+                registeredOrders.Add(notification.Order);
+            };
+
+            RegisterBrokerageSideOpenOrder(
+                brokerage,
+                CreateOpenOrderEvent(0, 937983719, IB.ActionSide.Buy, 100));
+
+            var secondOrderLookupArguments = new object[]
+            {
+                0,
+                nameof(BrokerageSideOrdersWithReusedBrokerageOrderIdAreMatchedByPermanentId),
+                null,
+                null,
+                false,
+                0,
+                937983740L
+            };
+            var foundSecondOrderBeforeRegistration = (bool)typeof(InteractiveBrokersBrokerage)
+                .GetMethod("TryGetLeanOrder", BindingFlags.NonPublic | BindingFlags.Instance)
+                .Invoke(brokerage, secondOrderLookupArguments);
+            Assert.IsFalse(foundSecondOrderBeforeRegistration);
+
+            RegisterBrokerageSideOpenOrder(
+                brokerage,
+                CreateOpenOrderEvent(0, 937983740, IB.ActionSide.Sell, 100));
+
+            var secondExecutionDetails = CreateExecutionDetails("DAVI", 937983740, IB.ActionSide.Sell, 100, 3.30);
+            var matchedOrder = (LeanOrder)typeof(InteractiveBrokersBrokerage)
+                .GetMethod("GetOrder", BindingFlags.NonPublic | BindingFlags.Instance)
+                .Invoke(brokerage, new object[] { secondExecutionDetails });
+
+            Assert.AreEqual(2, registeredOrders.Count);
+            Assert.AreEqual(registeredOrders[1].Id, matchedOrder.Id);
+            Assert.AreEqual(-100, matchedOrder.Quantity);
+        }
+
         private static IB.ExecutionDetailsEventArgs CreateExecutionDetails()
+        {
+            return CreateExecutionDetails("PDSB", 1221610158, IB.ActionSide.Sell, 100, 0.6109);
+        }
+
+        private static IB.ExecutionDetailsEventArgs CreateExecutionDetails(
+            string symbol,
+            long permanentOrderId,
+            string action,
+            int quantity,
+            double price)
         {
             return new IB.ExecutionDetailsEventArgs(
                 0,
                 new Contract
                 {
-                    Symbol = "PDSB",
+                    Symbol = symbol,
                     SecType = IB.SecurityType.Stock,
                     Exchange = "SMART",
                     Currency = "USD"
@@ -208,13 +340,51 @@ namespace QuantConnect.Tests.Brokerages.InteractiveBrokers
                 {
                     OrderId = 0,
                     ClientId = 0,
-                    PermId = 1221610158,
+                    PermId = permanentOrderId,
                     ExecId = "external-execution",
-                    Side = "SLD",
-                    Shares = 100,
-                    CumQty = 100,
-                    Price = 0.6109
+                    Side = action == IB.ActionSide.Sell ? "SLD" : "BOT",
+                    Shares = quantity,
+                    CumQty = quantity,
+                    Price = price
                 });
+        }
+
+        private static IB.OpenOrderEventArgs CreateOpenOrderEvent(
+            int brokerageOrderId,
+            long permanentOrderId,
+            string action,
+            int quantity)
+        {
+            return new IB.OpenOrderEventArgs(
+                brokerageOrderId,
+                new Contract
+                {
+                    Symbol = "DAVI",
+                    SecType = IB.SecurityType.Stock,
+                    Exchange = "SMART",
+                    Currency = "USD"
+                },
+                new IBApi.Order
+                {
+                    OrderId = brokerageOrderId,
+                    ClientId = 0,
+                    PermId = permanentOrderId,
+                    Action = action,
+                    TotalQuantity = quantity,
+                    OrderType = IB.OrderType.Limit,
+                    LmtPrice = 3.55,
+                    Tif = IB.TimeInForce.Day
+                },
+                new OrderState { Status = IB.OrderStatus.Submitted });
+        }
+
+        private static void RegisterBrokerageSideOpenOrder(
+            InteractiveBrokersBrokerage brokerage,
+            IB.OpenOrderEventArgs openOrderEvent)
+        {
+            typeof(InteractiveBrokersBrokerage)
+                .GetMethod("RegisterBrokerageSideOpenOrders", BindingFlags.NonPublic | BindingFlags.Instance)
+                .Invoke(brokerage, new object[] { openOrderEvent });
         }
 
         private static void SetPrivateFieldValue(object instance, string name, object value)

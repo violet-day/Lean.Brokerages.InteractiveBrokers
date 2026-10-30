@@ -197,6 +197,12 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
         // IB callbacks and later execution details do not emit duplicate reconciliation messages
         private readonly ConcurrentDictionary<(int ClientId, int OrderId, long PermanentId), int> _brokerageSideOrderCumulativeFilledQuantities = new();
 
+        // identifies brokerage-side LEAN orders independently from the reusable IB order ID
+        private readonly ConcurrentDictionary<int, (int ClientId, int OrderId, long PermanentId)> _brokerageSideOrderIdentitiesByLeanOrderId = new();
+
+        // tracks emitted brokerage-side fills so order status and execution callbacks cannot fill the same LEAN order twice
+        private readonly ConcurrentDictionary<(int LeanOrderId, int ClientId, int OrderId, long PermanentId), decimal> _brokerageSideOrderCumulativeEmittedFillQuantities = new();
+
         // holds account properties, cash balances and holdings for the account
         private readonly InteractiveBrokersAccountData _accountData = new InteractiveBrokersAccountData();
 
@@ -2417,7 +2423,12 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
                     return;
                 }
 
-                if (!TryGetLeanOrder(update.OrderId, nameof(HandleOrderStatusUpdates), out var orders))
+                if (!TryGetLeanOrder(
+                    update.OrderId,
+                    nameof(HandleOrderStatusUpdates),
+                    out var orders,
+                    brokerageClientId: update.ClientId,
+                    permanentOrderId: update.PermId))
                 {
                     if (!_skippedOrdersByFaGroup.ContainsKey(update.OrderId))
                     {
@@ -2442,9 +2453,14 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
 
                 if (status == OrderStatus.Filled || status == OrderStatus.PartiallyFilled)
                 {
-                    // fill events will be only processed in HandleExecutionDetails and HandleCommissionReports.
-                    // but first, we want to check whether stop limit orders were triggered.
+                    // LEAN-submitted order fills are processed in HandleExecutionDetails and HandleCommissionReports.
+                    // Brokerage-side orders also use order status as a fallback because IB does not always send execution details for them.
                     TryUpdateStopLimitTriggered(firstOrder, update.Status);
+
+                    if (IsBrokerageSideOrder(firstOrder, update.ClientId, update.OrderId, update.PermId))
+                    {
+                        EmitBrokerageSideOrderStatusFill(update, orders);
+                    }
 
                     return;
                 }
@@ -2515,6 +2531,98 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
                 BrokerageMessageType.Information,
                 "BrokerageSideOrderFill",
                 message));
+        }
+
+        private void EmitBrokerageSideOrderStatusFill(IB.OrderStatusEventArgs update, List<Order> orders)
+        {
+            if (orders.Count != 1)
+            {
+                Log.Error(
+                    $"InteractiveBrokersBrokerage.HandleOrderStatusUpdates(): Unable to emit a brokerage-side fill from order status. " +
+                    $"BrokerageOrderId: {update.OrderId}, PermanentId: {update.PermId}, ClientId: {update.ClientId}, " +
+                    $"LeanOrderCount: {orders.Count}");
+                return;
+            }
+
+            var order = orders[0];
+            if (!TryRegisterBrokerageSideOrderEventFill(
+                order.Id,
+                update.ClientId,
+                update.OrderId,
+                update.PermId,
+                update.Filled,
+                out var fillQuantity))
+            {
+                return;
+            }
+
+            var fillPrice = NormalizePriceToLean(
+                update.LastFillPrice != 0 ? update.LastFillPrice : update.AverageFillPrice,
+                order.Symbol);
+            var signedFillQuantity = order.Direction == OrderDirection.Buy ? fillQuantity : -fillQuantity;
+            var status = update.Remaining > 0 ? OrderStatus.PartiallyFilled : OrderStatus.Filled;
+
+            Log.Trace(
+                $"InteractiveBrokersBrokerage.HandleOrderStatusUpdates(): Emitting brokerage-side fill from order status. " +
+                $"BrokerageOrderId: {update.OrderId}, PermanentId: {update.PermId}, ClientId: {update.ClientId}, " +
+                $"LeanOrderId: {order.Id}, CumulativeQuantity: {update.Filled}, FillQuantity: {signedFillQuantity}, FillPrice: {fillPrice}");
+
+            OnOrderEvents(new List<OrderEvent>
+            {
+                new OrderEvent(order, DateTime.UtcNow, OrderFee.Zero, "Interactive Brokers Brokerage-Side Order Status Fill Event")
+                {
+                    Status = status,
+                    FillPrice = fillPrice,
+                    FillQuantity = signedFillQuantity
+                }
+            });
+        }
+
+        private bool TryRegisterBrokerageSideOrderEventFill(
+            int leanOrderId,
+            int clientId,
+            int brokerageOrderId,
+            long permanentOrderId,
+            decimal cumulativeFilledQuantity,
+            out decimal fillQuantity)
+        {
+            fillQuantity = 0;
+            if (cumulativeFilledQuantity <= 0)
+            {
+                return false;
+            }
+
+            var brokerageOrderKey = (leanOrderId, clientId, brokerageOrderId, permanentOrderId);
+            while (true)
+            {
+                if (!_brokerageSideOrderCumulativeEmittedFillQuantities.TryGetValue(
+                    brokerageOrderKey,
+                    out var previousCumulativeFilledQuantity))
+                {
+                    if (_brokerageSideOrderCumulativeEmittedFillQuantities.TryAdd(
+                        brokerageOrderKey,
+                        cumulativeFilledQuantity))
+                    {
+                        fillQuantity = cumulativeFilledQuantity;
+                        return true;
+                    }
+                    continue;
+                }
+
+                if (cumulativeFilledQuantity <= previousCumulativeFilledQuantity)
+                {
+                    return false;
+                }
+
+                if (_brokerageSideOrderCumulativeEmittedFillQuantities.TryUpdate(
+                    brokerageOrderKey,
+                    cumulativeFilledQuantity,
+                    previousCumulativeFilledQuantity))
+                {
+                    fillQuantity = cumulativeFilledQuantity - previousCumulativeFilledQuantity;
+                    return true;
+                }
+            }
         }
 
         private bool TryRegisterBrokerageSideOrderFill(
@@ -2592,7 +2700,14 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
                     return;
                 }
 
-                if (!TryGetLeanOrder(e.Order.OrderId, nameof(HandleOpenOrder), out var orders, e.Order.FaGroup, false))
+                if (!TryGetLeanOrder(
+                    e.Order.OrderId,
+                    nameof(HandleOpenOrder),
+                    out var orders,
+                    e.Order.FaGroup,
+                    false,
+                    e.Order.ClientId,
+                    e.Order.PermId))
                 {
                     if (!_skippedOrdersByFaGroup.ContainsKey(e.Order.OrderId))
                     {
@@ -2643,9 +2758,18 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
 
                 OnNewBrokerageOrderNotification(new NewBrokerageOrderNotificationEventArgs(brokerageSideOrder));
 
+                if (brokerageSideOrder.Id > 0)
+                {
+                    RegisterBrokerageSideOrderIdentity(
+                        brokerageSideOrder,
+                        openOrderEvent.Order.ClientId,
+                        openOrderEvent.OrderId,
+                        openOrderEvent.Order.PermId);
+                }
+
                 Log.Trace(
                     brokerageSideOrder.Id > 0
-                        ? $"InteractiveBrokersBrokerage.HandleOpenOrder(): Registered brokerage-side order. BrokerageOrderId: {openOrderEvent.OrderId}, LeanOrderId: {brokerageSideOrder.Id}"
+                        ? $"InteractiveBrokersBrokerage.HandleOpenOrder(): Registered brokerage-side order. BrokerageOrderId: {openOrderEvent.OrderId}, PermanentId: {openOrderEvent.Order.PermId}, ClientId: {openOrderEvent.Order.ClientId}, LeanOrderId: {brokerageSideOrder.Id}"
                         : $"InteractiveBrokersBrokerage.HandleOpenOrder(): Brokerage-side order was not accepted by the algorithm brokerage message handler. BrokerageOrderId: {openOrderEvent.OrderId}");
             }
         }
@@ -2686,7 +2810,9 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
             string caller,
             out List<Order> leanOrders,
             string faGroup = default,
-            bool logMissingOrder = true)
+            bool logMissingOrder = true,
+            int? brokerageClientId = default,
+            long? permanentOrderId = default)
         {
             leanOrders = default;
 
@@ -2696,17 +2822,63 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
                 return false;
             }
 
-            leanOrders = _orderProvider.GetOrdersByBrokerageId(brokerageOrderId);
+            leanOrders = brokerageClientId.HasValue && permanentOrderId.HasValue
+                ? GetOrdersByBrokerageIdentity(brokerageOrderId, brokerageClientId.Value, permanentOrderId.Value)
+                : _orderProvider.GetOrdersByBrokerageId(brokerageOrderId);
             if (leanOrders == null || leanOrders.Count == 0)
             {
                 if (logMissingOrder)
                 {
-                    Log.Error($"InteractiveBrokersBrokerage.{caller}(): Unable to locate order with BrokerageID {brokerageOrderId}");
+                    var brokerageIdentity = brokerageClientId.HasValue && permanentOrderId.HasValue
+                        ? $", ClientId {brokerageClientId.Value}, PermanentId {permanentOrderId.Value}"
+                        : string.Empty;
+                    Log.Error($"InteractiveBrokersBrokerage.{caller}(): Unable to locate order with BrokerageID {brokerageOrderId}{brokerageIdentity}");
                 }
                 return false;
             }
 
             return true;
+        }
+
+        private List<Order> GetOrdersByBrokerageIdentity(
+            int brokerageOrderId,
+            int brokerageClientId,
+            long permanentOrderId)
+        {
+            var orders = _orderProvider.GetOrdersByBrokerageId(brokerageOrderId);
+            if (orders == null || orders.Count == 0)
+            {
+                return orders;
+            }
+
+            var brokerageOrderIdentity = (brokerageClientId, brokerageOrderId, permanentOrderId);
+            var matchingBrokerageSideOrders = orders.Where(order =>
+                _brokerageSideOrderIdentitiesByLeanOrderId.TryGetValue(order.Id, out var registeredIdentity)
+                && registeredIdentity == brokerageOrderIdentity).ToList();
+
+            return matchingBrokerageSideOrders.Count > 0
+                ? matchingBrokerageSideOrders
+                : orders.Where(order => !_brokerageSideOrderIdentitiesByLeanOrderId.ContainsKey(order.Id)).ToList();
+        }
+
+        private void RegisterBrokerageSideOrderIdentity(
+            Order order,
+            int brokerageClientId,
+            int brokerageOrderId,
+            long permanentOrderId)
+        {
+            _brokerageSideOrderIdentitiesByLeanOrderId[order.Id] =
+                (brokerageClientId, brokerageOrderId, permanentOrderId);
+        }
+
+        private bool IsBrokerageSideOrder(
+            Order order,
+            int brokerageClientId,
+            int brokerageOrderId,
+            long permanentOrderId)
+        {
+            return _brokerageSideOrderIdentitiesByLeanOrderId.TryGetValue(order.Id, out var registeredIdentity)
+                && registeredIdentity == (brokerageClientId, brokerageOrderId, permanentOrderId);
         }
 
         /// <summary>
@@ -2863,7 +3035,10 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
         private Order GetOrder(IB.ExecutionDetailsEventArgs executionDetails)
         {
             var mappedSymbol = MapSymbol(executionDetails.Contract);
-            var orders = _orderProvider.GetOrdersByBrokerageId(executionDetails.Execution.OrderId);
+            var orders = GetOrdersByBrokerageIdentity(
+                executionDetails.Execution.OrderId,
+                executionDetails.Execution.ClientId,
+                executionDetails.Execution.PermId);
             var order = orders.Count == 1
                 ? orders[0]
                 : orders.SingleOrDefault(o => o.Symbol == mappedSymbol);
@@ -2882,6 +3057,14 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
                     order.BrokerId.Add(executionDetails.Execution.OrderId.ToStringInvariant());
                     // this event will add the order into the lean engine
                     OnNewBrokerageOrderNotification(new NewBrokerageOrderNotificationEventArgs(order));
+                    if (order.Id > 0)
+                    {
+                        RegisterBrokerageSideOrderIdentity(
+                            order,
+                            executionDetails.Execution.ClientId,
+                            executionDetails.Execution.OrderId,
+                            executionDetails.Execution.PermId);
+                    }
                 }
                 else if (orders.Count == 0)
                 {
@@ -2909,9 +3092,17 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
                     OnNewBrokerageOrderNotification(new NewBrokerageOrderNotificationEventArgs(order));
                     if (order.Id > 0)
                     {
+                        RegisterBrokerageSideOrderIdentity(
+                            order,
+                            executionDetails.Execution.ClientId,
+                            executionDetails.Execution.OrderId,
+                            executionDetails.Execution.PermId);
                         Log.Trace(
                             $"InteractiveBrokersBrokerage.HandleExecutionDetails(): Registered brokerage-side execution as a LEAN order. " +
-                            $"BrokerageOrderId: {executionDetails.Execution.OrderId}, LeanOrderId: {order.Id}");
+                            $"BrokerageOrderId: {executionDetails.Execution.OrderId}, " +
+                            $"PermanentId: {executionDetails.Execution.PermId}, " +
+                            $"ClientId: {executionDetails.Execution.ClientId}, " +
+                            $"LeanOrderId: {order.Id}");
                         return order;
                     }
 
@@ -3040,6 +3231,26 @@ namespace QuantConnect.Brokerages.InteractiveBrokers
             for (var i = 0; i < pendingOrdersFillDetails.Count; i++)
             {
                 var fillDetails = pendingOrdersFillDetails[i];
+
+                if (_brokerageSideOrderIdentitiesByLeanOrderId.TryGetValue(fillDetails.Order.Id, out var brokerageOrderIdentity))
+                {
+                    var cumulativeFilledQuantity = fillDetails.ExecutionDetails.Execution.CumQty;
+                    if (cumulativeFilledQuantity == 0)
+                    {
+                        cumulativeFilledQuantity = fillDetails.ExecutionDetails.Execution.Shares;
+                    }
+
+                    if (!TryRegisterBrokerageSideOrderEventFill(
+                        fillDetails.Order.Id,
+                        brokerageOrderIdentity.ClientId,
+                        brokerageOrderIdentity.OrderId,
+                        brokerageOrderIdentity.PermanentId,
+                        cumulativeFilledQuantity,
+                        out _))
+                    {
+                        continue;
+                    }
+                }
 
                 var targetOrder = fillDetails.Order;
                 var targetOrderExecutionDetails = fillDetails.ExecutionDetails;
